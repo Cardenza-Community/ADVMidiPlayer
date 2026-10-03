@@ -33,6 +33,9 @@
  */
 
 #include <Arduino.h>
+#ifdef CARDENZA_TARGET
+#include "cardenza_hal.h"
+#endif
 #include <M5Cardputer.h>
 #include <SD.h>
 #include <SPI.h>
@@ -47,8 +50,13 @@
 // ── TinySoundFont ─────────────────────────────────────────────────────────────
 #define TSF_NO_STDIO
 #define TSF_IMPLEMENTATION
-#define TSF_MALLOC(s)     heap_caps_malloc((s), MALLOC_CAP_DEFAULT)
-#define TSF_REALLOC(p,s)  heap_caps_realloc((p),(s), MALLOC_CAP_DEFAULT)
+#ifdef CARDENZA_TARGET
+#define MIDI_ALLOC_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#else
+#define MIDI_ALLOC_CAPS MALLOC_CAP_DEFAULT
+#endif
+#define TSF_MALLOC(s)     heap_caps_malloc((s), MIDI_ALLOC_CAPS)
+#define TSF_REALLOC(p,s)  heap_caps_realloc((p),(s), MIDI_ALLOC_CAPS)
 #define TSF_FREE(p)       heap_caps_free(p)
 #define TSF_MEMCPY(d,s,n) memcpy(d,s,n)
 #define TSF_MEMSET(d,v,n) memset(d,v,n)
@@ -59,8 +67,8 @@
 #define TML_IMPLEMENTATION
 #define TML_ERROR(msg)     Serial.printf("[TML] ERROR: %s\r\n", msg)
 #define TML_WARN(msg)      Serial.printf("[TML] WARN: %s\r\n", msg)
-#define TML_MALLOC(s)     heap_caps_malloc((s), MALLOC_CAP_DEFAULT)
-#define TML_REALLOC(p,s)  heap_caps_realloc((p),(s), MALLOC_CAP_DEFAULT)
+#define TML_MALLOC(s)     heap_caps_malloc((s), MIDI_ALLOC_CAPS)
+#define TML_REALLOC(p,s)  heap_caps_realloc((p),(s), MIDI_ALLOC_CAPS)
 #define TML_FREE(p)       heap_caps_free(p)
 #include "../lib/TinySoundFont/tml.h"
 
@@ -77,9 +85,15 @@
 #define PIN_SD_MISO  39
 #define PIN_SD_MOSI  14
 
+#ifdef CARDENZA_TARGET
+#define PIN_I2S_BCK 41
+#define PIN_I2S_WS 43
+#define PIN_I2S_DOUT 42
+#else
 #define PIN_I2S_BCK   8     // External I2S DAC (mode 2)
 #define PIN_I2S_WS    7
 #define PIN_I2S_DOUT  6
+#endif
 #define PIN_SPEAKER   2     // Internal speaker (mode 3 / 4)
 #define PIN_PDM_CLK   41    // Internal PDM clock (leave unconnected)
 
@@ -2035,6 +2049,9 @@ static String tailForUi(const String& path, size_t maxChars = 28) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 static AudioMode selectAudioMode(int saved) {
+#ifdef CARDENZA_TARGET
+  return AUDIO_I2S_DAC; // Onboard ES8156, not GPIO2 PDM/PWM or header DAC.
+#endif
   // Audio mode selection menu.
   auto& d = M5Cardputer.Display;
 
@@ -2411,8 +2428,25 @@ void setup() {
   // Display
   auto mcfg = M5.config();
   mcfg.internal_mic = false;
+#ifdef CARDENZA_TARGET
+  const bool cardenzaReady = cardenza_hal_init(32, 16);
+  mcfg.fallback_board = m5::board_t::board_M5Cardputer;
+  mcfg.internal_spk = false;
+  mcfg.internal_imu = false;
+  mcfg.internal_rtc = false;
+  mcfg.output_power = false;
+#else
   mcfg.internal_spk = true;
+#endif
   M5Cardputer.begin(mcfg, true);
+#ifdef CARDENZA_TARGET
+  pinMode(46, INPUT); // PDM DATA is input even while only the DAC is playing.
+  if (!cardenzaReady) {
+    showError("Cardenza audio init failed", "ES8156 identity/setup");
+    for (;;) delay(1000);
+  }
+  Serial.println("[Cardenza] ES8156 32fs; original keyboard; battery/RGB disabled");
+#endif
   auto& d = M5Cardputer.Display;
   d.setRotation(1);
   d.fillScreen(C_BG);
