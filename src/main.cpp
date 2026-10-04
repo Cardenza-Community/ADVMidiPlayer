@@ -10,7 +10,7 @@
  *    3 -> PDM speaker GPIO2         - no extra hardware,    16000Hz mono
  *    4 -> PWM LEDC GPIO2            - fallback,             16000Hz mono
  *
- *  (-DCARDPUTER_V11 removes the ES8311 option and renumbers modes to 1-3)
+ *  Hardware is detected at runtime; Cardenza uses its onboard ES8156.
  *
  *  Player controls:
  *    SPACE       Play / Pause
@@ -47,8 +47,9 @@
 // ── TinySoundFont ─────────────────────────────────────────────────────────────
 #define TSF_NO_STDIO
 #define TSF_IMPLEMENTATION
-#define TSF_MALLOC(s)     heap_caps_malloc((s), MALLOC_CAP_DEFAULT)
-#define TSF_REALLOC(p,s)  heap_caps_realloc((p),(s), MALLOC_CAP_DEFAULT)
+#define MIDI_ALLOC_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#define TSF_MALLOC(s)     heap_caps_malloc((s), MIDI_ALLOC_CAPS)
+#define TSF_REALLOC(p,s)  heap_caps_realloc((p),(s), MIDI_ALLOC_CAPS)
 #define TSF_FREE(p)       heap_caps_free(p)
 #define TSF_MEMCPY(d,s,n) memcpy(d,s,n)
 #define TSF_MEMSET(d,v,n) memset(d,v,n)
@@ -59,8 +60,8 @@
 #define TML_IMPLEMENTATION
 #define TML_ERROR(msg)     Serial.printf("[TML] ERROR: %s\r\n", msg)
 #define TML_WARN(msg)      Serial.printf("[TML] WARN: %s\r\n", msg)
-#define TML_MALLOC(s)     heap_caps_malloc((s), MALLOC_CAP_DEFAULT)
-#define TML_REALLOC(p,s)  heap_caps_realloc((p),(s), MALLOC_CAP_DEFAULT)
+#define TML_MALLOC(s)     heap_caps_malloc((s), MIDI_ALLOC_CAPS)
+#define TML_REALLOC(p,s)  heap_caps_realloc((p),(s), MIDI_ALLOC_CAPS)
 #define TML_FREE(p)       heap_caps_free(p)
 #include "../lib/TinySoundFont/tml.h"
 
@@ -1024,6 +1025,7 @@ static Es8311RenderStats renderEs8311Chunk(int16_t* buf, size_t frames) {
 static bool initAudio() {
   g_audioReady = false;
   g_i2sPort = I2S_NUM_0;
+  if (g_audioMode != AUDIO_ES8311) M5Cardputer.Speaker.end();
 
   switch (g_audioMode) {
 
@@ -1036,11 +1038,12 @@ static bool initAudio() {
       M5Cardputer.Speaker.setAllChannelVolume(255);
       resetEs8311Buffers(true);
       g_audioReady = true;
-      Serial.printf("[AUDIO] ES8311  %uHz mono via M5Cardputer.Speaker\r\n", g_sampleRate);
+      Serial.printf("[AUDIO] Onboard Speaker  %uHz mono via M5Cardputer.Speaker\r\n", g_sampleRate);
       return true;
     }
 
     case AUDIO_I2S_DAC: {
+      if (M5.isCardenza() && !M5.configureCardenzaAudio(32, 16)) return false;
       g_sampleRate = 22050;
       g_i2sPort = I2S_NUM_0;
       i2s_config_t c{};
@@ -1059,9 +1062,10 @@ static bool initAudio() {
         return false;
       }
       i2s_pin_config_t p{};
-      p.bck_io_num    = PIN_I2S_BCK;
-      p.ws_io_num     = PIN_I2S_WS;
-      p.data_out_num  = PIN_I2S_DOUT;
+      p.mck_io_num    = I2S_PIN_NO_CHANGE;
+      p.bck_io_num    = M5.isCardenza() ? 41 : PIN_I2S_BCK;
+      p.ws_io_num     = M5.isCardenza() ? 43 : PIN_I2S_WS;
+      p.data_out_num  = M5.isCardenza() ? 42 : PIN_I2S_DOUT;
       p.data_in_num   = I2S_PIN_NO_CHANGE;
       err = i2s_set_pin(g_i2sPort, &p);
       if (err != ESP_OK) {
@@ -2035,6 +2039,8 @@ static String tailForUi(const String& path, size_t maxChars = 28) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 static AudioMode selectAudioMode(int saved) {
+  if (M5.isCardenza()) return AUDIO_I2S_DAC; // Onboard ES8156.
+  if (M5.getBoard() == m5::board_t::board_M5Cardputer) return AUDIO_ES8311; // Native I2S amp.
   // Audio mode selection menu.
   auto& d = M5Cardputer.Display;
 
@@ -2047,7 +2053,6 @@ static AudioMode selectAudioMode(int saved) {
     uint16_t     col;
   };
 
-#ifndef CARDPUTER_V11
   const Opt opts[] = {
     { AUDIO_ES8311,  "1", "ADV built-in ES8311",
       "22kHz mono - built-in output",
@@ -2063,20 +2068,7 @@ static AudioMode selectAudioMode(int saved) {
       "Cardputer built-in speaker",   0xFD20 },
   };
   const int N = 4;
-#else
-  const Opt opts[] = {
-    { AUDIO_I2S_DAC, "1", "External I2S DAC",
-      "22kHz stereo - external DAC",
-      "MAX98357A / PCM5102 on GPIO 6/7/8", 0x07E0 },
-    { AUDIO_PDM,     "2", "PDM speaker GPIO2",
-      "16kHz mono - no extra hardware",
-      "Cardputer built-in speaker",   0x07FF },
-    { AUDIO_PWM,     "3", "PWM LEDC GPIO2",
-      "16kHz mono - universal fallback",
-      "Cardputer built-in speaker",   0xFD20 },
-  };
-  const int N = 3;
-#endif
+
 
   // Find the default index from the saved config.
   int sel = 0;
@@ -2413,6 +2405,11 @@ void setup() {
   mcfg.internal_mic = false;
   mcfg.internal_spk = true;
   M5Cardputer.begin(mcfg, true);
+  if (M5.isCardenza() && !M5.cardenzaCodecReady()) {
+    showError("Cardenza audio init failed", "ES8156 identity/setup");
+    for (;;) delay(1000);
+  }
+  if (M5.isCardenza()) Serial.println("[Cardenza] ES8156 runtime; original keyboard");
   auto& d = M5Cardputer.Display;
   d.setRotation(1);
   d.fillScreen(C_BG);
@@ -2441,11 +2438,7 @@ void setup() {
   d.setCursor(14, 10); d.println("GM MIDI Player");
   d.setTextSize(1); d.setTextColor(C_DIM);
   d.setCursor(14, 35);
-#ifndef CARDPUTER_V11
-  d.println("Cardputer ADV");
-#else
-  d.println("Cardputer v1.1");
-#endif
+  d.println(M5.isCardenza() ? "Cardenza" : M5.getBoard() == m5::board_t::board_M5CardputerADV ? "Cardputer ADV" : "Cardputer v1.1");
   d.drawFastHLine(0, 48, 240, C_ACCENT);
   int sy = 55;
   auto sl_ = [&](const char* msg) {
